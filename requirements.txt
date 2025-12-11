@@ -1,35 +1,7 @@
-# Application de conversation anglaise avec Groq AI
-# Requirements.txt
-
-# Framework principal
+# Version minimale - English Tutor avec Groq
 streamlit>=1.28.0
-
-# API Groq (gratuit et rapide)
 groq>=0.3.0
-
-# Reconnaissance vocale
 speechrecognition>=3.10.0
-pyaudio>=0.2.11  # Pour l'enregistrement audio (si problème, voir note ci-dessous)
-
-# Synthèse vocale (TTS)
 gtts>=2.3.0
-pyttsx3>=2.90
-
-# Correction de grammaire et orthographe
 pyspellchecker>=0.7.2
-spacy>=3.7.0
-# Note: Après installation, exécutez: python -m spacy download en_core_web_sm
-
-# Gestion des variables d'environnement
 python-dotenv>=1.0.0
-
-# Manipulation audio
-pydub>=0.25.1
-
-# Utilitaires
-numpy>=1.24.0
-pandas>=2.0.0  # Optionnel pour l'analyse de progression
-scipy>=1.10.0  # Pour le traitement audio avancé
-
-# Gestion des fichiers temporaires
-tempfile2>=0.1.0
