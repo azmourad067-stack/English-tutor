@@ -5,4 +5,4 @@ speechrecognition>=3.10.0
 gtts>=2.3.0
 pyspellchecker>=0.7.2
 python-dotenv>=1.0.0
-pyttx3
+
