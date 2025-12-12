@@ -50,6 +50,32 @@ with st.sidebar:
             help="Obtenez votre clé sur console.groq.com"
         )
         st.markdown("[📝 Obtenir une clé Groq gratuite](https://console.groq.com)")
+        
+        # Aide pour vérifier la clé
+        with st.expander("❓ Problème avec la clé API ?"):
+            st.markdown("""
+            **Si la transcription audio ne fonctionne pas:**
+            
+            1. **Vérifiez votre clé:**
+               - Allez sur [console.groq.com](https://console.groq.com)
+               - Cliquez sur "API Keys"
+               - Vérifiez que votre clé est active
+            
+            2. **Créez une nouvelle clé:**
+               - Cliquez sur "Create API Key"
+               - Donnez-lui un nom
+               - Copiez la clé complète (commence par `gsk_...`)
+               - Collez-la dans le champ ci-dessus
+            
+            3. **Vérifiez le format:**
+               - La clé doit commencer par `gsk_`
+               - Elle fait environ 50-60 caractères
+               - Pas d'espaces avant/après
+            
+            4. **En attendant:**
+               - Vous pouvez taper vos messages au lieu de parler
+               - Les réponses audio fonctionneront toujours
+            """)
     else:
         st.info("🤗 Hugging Face offre une API gratuite !")
         api_key = st.text_input(
@@ -269,21 +295,52 @@ Remember: You're a conversation partner, not a strict teacher. Make it fun and n
 
 # Fonction pour transcrire l'audio avec Groq Whisper
 def transcribe_audio_groq(audio_bytes, api_key):
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    """Transcrit l'audio avec Groq Whisper"""
+    try:
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        files = {
+            "file": ("audio.wav", audio_bytes, "audio/wav"),
+            "model": (None, "whisper-large-v3"),
+            "language": (None, "en")
+        }
+        
+        response = requests.post(url, headers=headers, files=files, timeout=30)
+        response.raise_for_status()
+        return response.json()["text"]
     
-    headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            raise Exception("Clé API Groq invalide ou expirée. Vérifiez votre clé dans la barre latérale.")
+        elif e.response.status_code == 403:
+            raise Exception("Accès refusé. Assurez-vous que votre clé API Groq a les permissions nécessaires.")
+        else:
+            raise Exception(f"Erreur API Groq: {e.response.status_code} - {e.response.text}")
+    except requests.exceptions.Timeout:
+        raise Exception("La transcription a pris trop de temps. Réessayez avec un audio plus court.")
+    except Exception as e:
+        raise Exception(f"Erreur de transcription: {str(e)}")
+
+# Fonction alternative de transcription avec Web Speech API (via navigateur)
+def transcribe_audio_browser():
+    """Alternative: utilise l'API de reconnaissance vocale du navigateur"""
+    st.info("""
+    💡 **Alternative gratuite sans API:**
     
-    files = {
-        "file": ("audio.wav", audio_bytes, "audio/wav"),
-        "model": (None, "whisper-large-v3"),
-        "language": (None, "en")
-    }
+    Si la transcription Groq ne fonctionne pas:
+    1. Utilisez la reconnaissance vocale de votre navigateur (Chrome/Edge recommandé)
+    2. Ou tapez directement votre message
+    3. Ou vérifiez que votre clé API Groq est valide
     
-    response = requests.post(url, headers=headers, files=files)
-    response.raise_for_status()
-    return response.json()["text"]
+    **Pour vérifier votre clé Groq:**
+    - Allez sur console.groq.com
+    - Vérifiez que la clé est active
+    - Créez une nouvelle clé si nécessaire
+    """)
 
 # Fonction pour générer l'audio avec OpenAI TTS (compatible Groq)
 def text_to_speech(text, api_key, voice="nova"):
@@ -521,7 +578,12 @@ if audio and not st.session_state.audio_processed:
             audio_bytes = audio['bytes']
             
             if service == "Groq (Recommandé)":
-                transcription = transcribe_audio_groq(audio_bytes, api_key)
+                try:
+                    transcription = transcribe_audio_groq(audio_bytes, api_key)
+                except Exception as e:
+                    st.error(f"❌ {str(e)}")
+                    transcribe_audio_browser()
+                    transcription = None
             else:
                 st.warning("⚠️ La transcription audio nécessite Groq. Veuillez sélectionner Groq dans les paramètres.")
                 transcription = None
@@ -542,16 +604,17 @@ if audio and not st.session_state.audio_processed:
                             # Générer et jouer l'audio
                             if enable_tts:
                                 with st.spinner("🔊 Génération audio..."):
-                                    audio_bytes = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
-                                    if audio_bytes:
+                                    audio_bytes_response = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
+                                    if audio_bytes_response:
                                         audio_key = f"audio_{len(st.session_state.messages)-1}"
-                                        st.session_state[audio_key] = audio_bytes
-                                        audio_html = create_audio_player(audio_bytes, auto_play=auto_play if 'auto_play' in locals() else True)
+                                        st.session_state[audio_key] = audio_bytes_response
+                                        audio_html = create_audio_player(audio_bytes_response, auto_play=auto_play if 'auto_play' in locals() else True)
                                         if audio_html:
                                             st.markdown(audio_html, unsafe_allow_html=True)
         
         except Exception as e:
-            st.error(f"❌ Erreur de transcription: {str(e)}")
+            st.error(f"❌ Erreur inattendue: {str(e)}")
+            st.info("💡 Essayez de taper votre message à la place, ou vérifiez votre clé API Groq.")
 
 # Réinitialiser le flag audio après traitement
 if st.session_state.audio_processed:
