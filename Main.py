@@ -1,418 +1,636 @@
 import streamlit as st
-import os
-import tempfile
-import re
-from dotenv import load_dotenv
-from gtts import gTTS
-from spellchecker import SpellChecker
-import speech_recognition as sr
+import requests
+import json
+from datetime import datetime
+from streamlit_mic_recorder import mic_recorder
+import base64
 
-# ===== CONFIGURATION INITIALE =====
+# Configuration de la page
 st.set_page_config(
-    page_title="English Conversation Partner",
+    page_title="English Conversation Practice",
     page_icon="🗣️",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# ===== SIDEBAR - CONFIGURATION =====
+# Initialisation de la session
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "corrections" not in st.session_state:
+    st.session_state.corrections = []
+if "conversation_count" not in st.session_state:
+    st.session_state.conversation_count = 0
+if "audio_processed" not in st.session_state:
+    st.session_state.audio_processed = False
+if "saved_conversations" not in st.session_state:
+    st.session_state.saved_conversations = []
+if "conversation_title" not in st.session_state:
+    st.session_state.conversation_title = ""
+
+# Titre et description
+st.title("🗣️ English Conversation Practice")
+st.markdown("### Pratiquez votre anglais avec une conversation naturelle - 100% GRATUIT")
+
+# Sidebar pour les paramètres
 with st.sidebar:
-    st.title("🔧 Configuration")
+    st.header("⚙️ Paramètres")
     
-    # Section API Key
-    st.subheader("1. Clé API Groq")
-    
-    st.markdown("""
-    **Pour obtenir une clé GRATUITE :**
-    1. [console.groq.com](https://console.groq.com)
-    2. Créez un compte gratuit
-    3. **API Keys** → **Create API Key**
-    4. Copiez la clé (`gsk_...`)
-    """)
-    
-    # Input pour la clé API
-    api_key_input = st.text_input(
-        "Collez votre clé API Groq :",
-        type="password",
-        placeholder="gsk_votre_clé_ici",
-        key="api_key_input"
+    # Choix du service gratuit
+    service = st.radio(
+        "Service d'IA (gratuit)",
+        ["Groq (Recommandé)", "Hugging Face"],
+        help="Groq est plus rapide et performant"
     )
     
-    if st.button("💾 Sauvegarder la clé", use_container_width=True):
-        if api_key_input:
-            st.session_state.groq_api_key = api_key_input
-            st.success("✅ Clé sauvegardée !")
-            st.rerun()
-        else:
-            st.error("❌ Veuillez entrer une clé valide")
+    # Clé API selon le service
+    if service == "Groq (Recommandé)":
+        st.info("🎉 Groq offre une API gratuite avec 14,400 requêtes/jour !")
+        api_key = st.text_input(
+            "Clé API Groq (gratuite)",
+            type="password",
+            help="Obtenez votre clé sur console.groq.com"
+        )
+        st.markdown("[📝 Obtenir une clé Groq gratuite](https://console.groq.com)")
+    else:
+        st.info("🤗 Hugging Face offre une API gratuite !")
+        api_key = st.text_input(
+            "Clé API Hugging Face (gratuite)",
+            type="password",
+            help="Obtenez votre clé sur huggingface.co"
+        )
+        st.markdown("[📝 Obtenir une clé HF gratuite](https://huggingface.co/settings/tokens)")
     
-    # Afficher état de la clé
-    if 'groq_api_key' in st.session_state:
-        st.success(f"✅ Clé configurée (...{st.session_state.groq_api_key[-4:]})")
-    
-    st.divider()
-    
-    # Paramètres de conversation
-    st.subheader("2. Paramètres de conversation")
-    
-    # Options de langue pour gTTS
-    voice_options = {
-        "Anglais (US)": "en",
-        "Anglais (UK)": "en-uk",
-        "Anglais (Australie)": "en-au"
-    }
-    
-    selected_voice = st.selectbox(
-        "Accent anglais :",
-        list(voice_options.keys()),
-        index=0
+    # Option audio
+    st.subheader("🔊 Options Audio")
+    enable_tts = st.checkbox(
+        "Activer les réponses audio",
+        value=True,
+        help="L'IA vous répondra en audio"
     )
     
-    conversation_topic = st.selectbox(
-        "Sujet :",
-        ["Daily Life", "Travel", "Food", "Hobbies", "Work", "Movies", "Sports", "Free Talk"]
+    if enable_tts:
+        voice_choice = st.selectbox(
+            "Voix",
+            ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+            index=4,
+            help="Choisissez la voix de l'assistant"
+        )
+        
+        auto_play = st.checkbox(
+            "Lecture automatique",
+            value=True,
+            help="Jouer l'audio automatiquement"
+        )
+    
+    # Niveau d'anglais
+    level = st.selectbox(
+        "Votre niveau d'anglais",
+        ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"]
     )
     
-    difficulty_level = st.select_slider(
-        "Niveau :",
-        options=["Beginner", "Intermediate", "Advanced"],
-        value="Intermediate"
-    )
+    # Sujets de conversation
+    st.subheader("📚 Sujets suggérés")
+    topics = [
+        "Daily routines", "Hobbies", "Travel", "Food & Cooking",
+        "Movies & TV", "Work & Career", "Family & Friends",
+        "Weather", "Technology", "Sports"
+    ]
+    selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics)
     
-    # Options de correction
-    st.checkbox("Corriger ma grammaire", value=True, key="correct_grammar")
-    st.checkbox("Parler lentement", value=False, key="slow_speech")
+    # Statistiques
+    st.subheader("📊 Statistiques")
+    st.metric("Messages envoyés", st.session_state.conversation_count)
+    st.metric("Corrections reçues", len(st.session_state.corrections))
     
-    # Boutons d'action
+    # Sauvegarde de conversation
+    st.subheader("💾 Sauvegarde")
+    
+    if len(st.session_state.messages) > 0:
+        conv_title = st.text_input(
+            "Titre de la conversation",
+            value=st.session_state.conversation_title,
+            placeholder="Ex: Ma première conversation"
+        )
+        
+        col_save1, col_save2 = st.columns(2)
+        
+        with col_save1:
+            if st.button("💾 Sauvegarder", use_container_width=True):
+                if conv_title.strip():
+                    conversation_data = {
+                        "title": conv_title,
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "level": level,
+                        "topic": selected_topic,
+                        "messages": st.session_state.messages.copy(),
+                        "corrections": st.session_state.corrections.copy(),
+                        "message_count": st.session_state.conversation_count
+                    }
+                    st.session_state.saved_conversations.append(conversation_data)
+                    st.session_state.conversation_title = conv_title
+                    st.success("✅ Conversation sauvegardée !")
+                else:
+                    st.error("⚠️ Donnez un titre à la conversation")
+        
+        with col_save2:
+            # Télécharger en JSON
+            if st.session_state.messages:
+                conversation_json = json.dumps({
+                    "title": conv_title or "Conversation sans titre",
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "level": level,
+                    "topic": selected_topic,
+                    "messages": st.session_state.messages,
+                    "corrections": st.session_state.corrections
+                }, indent=2, ensure_ascii=False)
+                
+                st.download_button(
+                    label="📥 Télécharger",
+                    data=conversation_json,
+                    file_name=f"conversation_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+    
+    # Historique des conversations
+    if len(st.session_state.saved_conversations) > 0:
+        st.subheader("📚 Conversations sauvegardées")
+        
+        for idx, conv in enumerate(reversed(st.session_state.saved_conversations)):
+            with st.expander(f"📝 {conv['title']} - {conv['date']}"):
+                st.markdown(f"**Niveau:** {conv['level']}")
+                st.markdown(f"**Sujet:** {conv['topic']}")
+                st.markdown(f"**Messages:** {conv['message_count']}")
+                st.markdown(f"**Corrections:** {len(conv['corrections'])}")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("👁️ Voir", key=f"view_{idx}"):
+                        st.session_state.messages = conv['messages'].copy()
+                        st.session_state.corrections = conv['corrections'].copy()
+                        st.session_state.conversation_count = conv['message_count']
+                        st.rerun()
+                
+                with col2:
+                    conv_json = json.dumps(conv, indent=2, ensure_ascii=False)
+                    st.download_button(
+                        label="📥 Export",
+                        data=conv_json,
+                        file_name=f"{conv['title'].replace(' ', '_')}.json",
+                        mime="application/json",
+                        key=f"download_{idx}"
+                    )
+                
+                with col3:
+                    if st.button("🗑️ Supprimer", key=f"delete_{idx}"):
+                        real_idx = len(st.session_state.saved_conversations) - 1 - idx
+                        st.session_state.saved_conversations.pop(real_idx)
+                        st.rerun()
+    
+    # Bouton pour réinitialiser
+    if st.button("🔄 Nouvelle conversation"):
+        st.session_state.messages = []
+        st.session_state.corrections = []
+        st.session_state.audio_processed = False
+        st.session_state.conversation_title = ""
+        st.rerun()
+
+# Vérification de la clé API
+if not api_key:
+    st.warning("⚠️ Veuillez entrer votre clé API gratuite dans la barre latérale pour commencer.")
+    
     col1, col2 = st.columns(2)
+    
     with col1:
-        if st.button("🗑️ Effacer", use_container_width=True):
-            for key in ['conversation_history', 'corrections']:
-                if key in st.session_state:
-                    st.session_state[key] = []
-            st.rerun()
+        st.success("### 🚀 Option 1: Groq (Recommandé)")
+        st.markdown("""
+        **Avantages:**
+        - ✅ Très rapide
+        - ✅ 14,400 requêtes/jour GRATUITES
+        - ✅ Meilleure qualité de réponse
+        - ✅ Reconnaissance vocale (Whisper)
+        - ✅ Synthèse vocale incluse
+        
+        **Comment faire:**
+        1. Allez sur [console.groq.com](https://console.groq.com)
+        2. Créez un compte gratuit
+        3. Allez dans "API Keys"
+        4. Créez une nouvelle clé
+        5. Copiez-la dans la barre latérale
+        """)
     
     with col2:
-        if st.button("🔄 Actualiser", use_container_width=True):
-            st.rerun()
-
-# ===== FONCTIONS PRINCIPALES =====
-def get_groq_client():
-    """Obtenir le client Groq"""
-    if 'groq_api_key' not in st.session_state:
-        return None
+        st.info("### 🤗 Option 2: Hugging Face")
+        st.markdown("""
+        **Avantages:**
+        - ✅ Totalement gratuit
+        - ✅ Pas de limite stricte
+        - ✅ Beaucoup de modèles disponibles
+        
+        **Note:** La synthèse vocale nécessite Groq
+        
+        **Comment faire:**
+        1. Allez sur [huggingface.co](https://huggingface.co)
+        2. Créez un compte gratuit
+        3. Allez dans Settings > Access Tokens
+        4. Créez un nouveau token
+        5. Copiez-le dans la barre latérale
+        """)
     
-    try:
-        from groq import Groq
-        return Groq(api_key=st.session_state.groq_api_key)
-    except:
-        return None
+    st.stop()
 
-def transcribe_audio(audio_bytes):
-    """Transcrire audio en texte"""
-    try:
-        # Sauvegarder temporairement
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            tmp_file.write(audio_bytes)
-            tmp_path = tmp_file.name
-        
-        # Utiliser speech_recognition
-        recognizer = sr.Recognizer()
-        
-        with sr.AudioFile(tmp_path) as source:
-            # Réduire le bruit
-            recognizer.adjust_for_ambient_noise(source, duration=0.3)
-            audio = recognizer.record(source)
-            
-            # Essayer Google Web Speech API (gratuit)
-            try:
-                text = recognizer.recognize_google(audio, language="en-US")
-                return text
-            except sr.UnknownValueError:
-                return "Sorry, I couldn't understand the audio."
-            except sr.RequestError:
-                return "Speech service unavailable. Please type instead."
-                
-    except Exception as e:
-        return f"Error: {str(e)[:50]}"
-
-def text_to_speech_simple(text, lang='en', slow=False):
-    """Synthèse vocale simple avec gTTS"""
-    try:
-        # Créer fichier temporaire
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        temp_path = temp_file.name
-        temp_file.close()
-        
-        # Générer audio avec gTTS
-        tts = gTTS(text=text, lang=lang, slow=slow)
-        tts.save(temp_path)
-        
-        return temp_path
-    except Exception as e:
-        st.error(f"Voice generation failed: {str(e)}")
-        return None
-
-def check_grammar(text):
-    """Vérification simple de grammaire"""
-    corrections = []
-    
-    # Initialiser correcteur d'orthographe
-    try:
-        spell = SpellChecker(language='en')
-        
-        # Vérifier l'orthographe
-        words = text.split()
-        misspelled = spell.unknown(words)
-        
-        for word in misspelled:
-            suggestion = spell.correction(word)
-            if suggestion and suggestion != word:
-                corrections.append(f"Spelling: '{word}' → '{suggestion}'")
-    except:
-        pass  # Ignorer si spellchecker ne fonctionne pas
-    
-    # Vérifier erreurs courantes
-    common_errors = {
-        r'\bi (am|was)\b': 'I',
-        r'your welcome': "you're welcome",
-        r'could of': 'could have',
+# Système de prompt pour l'IA
+def get_system_prompt(level, topic):
+    level_instructions = {
+        "Débutant (A1-A2)": "Use simple vocabulary and short sentences. Speak slowly and clearly.",
+        "Intermédiaire (B1-B2)": "Use everyday vocabulary with some idioms. Encourage natural conversation.",
+        "Avancé (C1-C2)": "Use advanced vocabulary and complex structures. Challenge the learner."
     }
     
-    for pattern, correction in common_errors.items():
-        if re.search(pattern, text, re.IGNORECASE):
-            corrections.append(f"Grammar: Use '{correction}'")
+    topic_instruction = f" Focus the conversation on {topic}." if topic != "Libre" else ""
     
-    if corrections:
-        return "💡 Suggestions:\n" + "\n".join(f"- {c}" for c in corrections[:3])
+    return f"""You are a friendly English conversation partner helping a French speaker practice English.
+
+Level: {level}
+Instructions: {level_instructions[level]}{topic_instruction}
+
+Your role:
+1. Have natural, friendly conversations like a friend would
+2. Ask follow-up questions to keep the conversation flowing
+3. If the user makes grammatical errors, gently correct them by:
+   - First responding naturally to their message
+   - Then adding a helpful note like "💡 Petite correction: instead of 'I go yesterday', say 'I went yesterday'"
+4. Encourage the user and be supportive
+5. Keep responses concise (2-4 sentences typically)
+6. Use casual, friendly language
+7. Show interest in what they say
+
+Remember: You're a conversation partner, not a strict teacher. Make it fun and natural!"""
+
+# Fonction pour transcrire l'audio avec Groq Whisper
+def transcribe_audio_groq(audio_bytes, api_key):
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    files = {
+        "file": ("audio.wav", audio_bytes, "audio/wav"),
+        "model": (None, "whisper-large-v3"),
+        "language": (None, "en")
+    }
+    
+    response = requests.post(url, headers=headers, files=files)
+    response.raise_for_status()
+    return response.json()["text"]
+
+# Fonction pour générer l'audio avec OpenAI TTS (compatible Groq)
+def text_to_speech(text, api_key, voice="nova"):
+    """Utilise l'API OpenAI TTS (gratuit avec certains services ou limité)"""
+    try:
+        # Pour une solution 100% gratuite, on utilise gTTS via web
+        # Mais avec Groq, on peut aussi utiliser leur endpoint TTS s'ils en ont un
+        
+        # Alternative gratuite : Google TTS via gTTS
+        from gtts import gTTS
+        import io
+        
+        # Créer l'audio
+        tts = gTTS(text=text, lang='en', slow=False)
+        
+        # Sauvegarder dans un buffer
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+        
+        return audio_buffer.read()
+    
+    except ImportError:
+        # Si gTTS n'est pas disponible, on essaie l'API OpenAI (payante mais compatible)
+        st.warning("⚠️ gTTS non installé. Installez-le avec: pip install gtts")
+        return None
+    except Exception as e:
+        st.error(f"Erreur TTS: {str(e)}")
+        return None
+
+# Fonction pour créer un lecteur audio HTML5
+def create_audio_player(audio_bytes, auto_play=True):
+    """Crée un lecteur audio HTML5 avec les données audio"""
+    if audio_bytes:
+        audio_base64 = base64.b64encode(audio_bytes).decode()
+        autoplay_attr = "autoplay" if auto_play else ""
+        audio_html = f"""
+        <audio controls {autoplay_attr} style="width: 100%;">
+            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+            Votre navigateur ne supporte pas l'élément audio.
+        </audio>
+        """
+        return audio_html
     return None
 
-def get_ai_response(user_input, topic, level):
-    """Obtenir réponse de Groq"""
-    client = get_groq_client()
+# Fonction pour appeler l'API Groq
+def call_groq_api(messages, api_key, system_prompt):
+    url = "https://api.groq.com/openai/v1/chat/completions"
     
-    # Mode démo si pas de client
-    if not client:
-        demo_responses = [
-            "Hello! I'm here to help you practice English. How are you today?",
-            "Nice to meet you! What would you like to talk about?",
-            "Let's practice English together! Tell me about your day.",
-            "I'm excited to help you improve your English! What's on your mind?"
-        ]
-        import random
-        return random.choice(demo_responses)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
     
+    api_messages = [{"role": "system", "content": system_prompt}]
+    api_messages.extend(messages)
+    
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": api_messages,
+        "temperature": 0.7,
+        "max_tokens": 1000
+    }
+    
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+# Fonction pour appeler l'API Hugging Face
+def call_huggingface_api(messages, api_key, system_prompt):
+    url = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    full_prompt = system_prompt + "\n\n"
+    for msg in messages:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        full_prompt += f"{role}: {msg['content']}\n"
+    full_prompt += "Assistant:"
+    
+    data = {
+        "inputs": full_prompt,
+        "parameters": {
+            "max_new_tokens": 500,
+            "temperature": 0.7,
+            "return_full_text": False
+        }
+    }
+    
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    result = response.json()
+    
+    if isinstance(result, list) and len(result) > 0:
+        return result[0].get("generated_text", "")
+    return ""
+
+# Fonction pour analyser les corrections
+def extract_corrections(response_text):
+    if "💡" in response_text or "correction" in response_text.lower():
+        lines = response_text.split("\n")
+        for line in lines:
+            if "💡" in line or "correction" in line.lower():
+                return line.strip()
+    return None
+
+# Fonction pour traiter un message (texte ou audio)
+def process_message(user_input):
+    if not user_input or user_input.strip() == "":
+        return
+    
+    # Ajouter le message de l'utilisateur
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.conversation_count += 1
+    
+    # Préparer les messages pour l'API
+    api_messages = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in st.session_state.messages
+    ]
+    
+    # Obtenir la réponse de l'IA
     try:
-        # Construire le prompt
-        system_prompt = f"""You are a friendly English conversation partner.
-        Topic: {topic}
-        Student level: {level}
+        system_prompt = get_system_prompt(level, selected_topic)
         
-        Respond naturally (2-3 sentences).
-        Ask follow-up questions.
-        Be encouraging and helpful."""
+        if service == "Groq (Recommandé)":
+            assistant_message = call_groq_api(api_messages, api_key, system_prompt)
+        else:
+            assistant_message = call_huggingface_api(api_messages, api_key, system_prompt)
         
-        # Appeler Groq API
-        response = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input}
-            ],
-            model="llama3-8b-8192",
-            temperature=0.7,
-            max_tokens=150
-        )
+        # Sauvegarder la réponse
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": assistant_message
+        })
         
-        return response.choices[0].message.content
+        # Extraire et sauvegarder les corrections
+        correction = extract_corrections(assistant_message)
+        if correction:
+            st.session_state.corrections.append({
+                "timestamp": datetime.now().strftime("%H:%M"),
+                "user_message": user_input,
+                "correction": correction
+            })
         
+        return assistant_message
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            st.error("❌ Clé API invalide. Vérifiez votre clé dans la barre latérale.")
+        elif e.response.status_code == 429:
+            st.error("⏳ Limite de taux atteinte. Attendez quelques secondes et réessayez.")
+        else:
+            st.error(f"❌ Erreur API: {str(e)}")
+        return None
     except Exception as e:
-        return f"Let's continue our conversation! What else would you like to talk about?"
+        st.error(f"❌ Erreur: {str(e)}")
+        return None
 
-# ===== INTERFACE PRINCIPALE =====
-st.title("🗣️ English Conversation Partner")
+# Zone de conversation
+st.subheader("💬 Conversation")
 
-# Message si pas de clé API
-if 'groq_api_key' not in st.session_state:
-    st.info("""
-    👋 **Bienvenue !**
+# Afficher l'historique des messages
+for i, msg in enumerate(st.session_state.messages):
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+        
+        # Ajouter un lecteur audio pour les messages de l'assistant
+        if msg["role"] == "assistant" and enable_tts:
+            # Créer une clé unique pour chaque message
+            audio_key = f"audio_{i}"
+            
+            # Vérifier si l'audio existe déjà dans la session
+            if audio_key not in st.session_state:
+                with st.spinner("🔊 Génération audio..."):
+                    audio_bytes = text_to_speech(msg["content"], api_key, voice_choice if 'voice_choice' in locals() else "nova")
+                    if audio_bytes:
+                        st.session_state[audio_key] = audio_bytes
+            
+            # Afficher le lecteur audio
+            if audio_key in st.session_state:
+                audio_html = create_audio_player(st.session_state[audio_key], auto_play=False)
+                if audio_html:
+                    st.markdown(audio_html, unsafe_allow_html=True)
+
+# Section d'entrée avec micro et texte
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    user_input = st.chat_input("Tapez votre message en anglais...")
     
-    Pour commencer :
-    1. Obtenez une clé API gratuite sur [Groq](https://console.groq.com)
-    2. Collez-la dans la barre latérale à gauche
-    3. Cliquez sur "Sauvegarder la clé"
+with col2:
+    st.markdown("### 🎤")
+    audio = mic_recorder(
+        start_prompt="🎤 Parler",
+        stop_prompt="⏹️ Stop",
+        just_once=True,
+        use_container_width=True,
+        key='recorder'
+    )
+
+# Traiter l'entrée texte
+if user_input:
+    with st.chat_message("user"):
+        st.write(user_input)
     
-    L'application fonctionne en mode démo sans clé API.
+    with st.chat_message("assistant"):
+        with st.spinner("💭 En train de réfléchir..."):
+            assistant_response = process_message(user_input)
+            
+            if assistant_response:
+                st.write(assistant_response)
+                
+                # Générer et jouer l'audio
+                if enable_tts:
+                    with st.spinner("🔊 Génération audio..."):
+                        audio_bytes = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
+                        if audio_bytes:
+                            # Sauvegarder dans la session
+                            audio_key = f"audio_{len(st.session_state.messages)-1}"
+                            st.session_state[audio_key] = audio_bytes
+                            
+                            # Afficher le lecteur
+                            audio_html = create_audio_player(audio_bytes, auto_play=auto_play if 'auto_play' in locals() else True)
+                            if audio_html:
+                                st.markdown(audio_html, unsafe_allow_html=True)
+
+# Traiter l'entrée audio
+if audio and not st.session_state.audio_processed:
+    with st.spinner("🎤 Transcription en cours..."):
+        try:
+            audio_bytes = audio['bytes']
+            
+            if service == "Groq (Recommandé)":
+                transcription = transcribe_audio_groq(audio_bytes, api_key)
+            else:
+                st.warning("⚠️ La transcription audio nécessite Groq. Veuillez sélectionner Groq dans les paramètres.")
+                transcription = None
+            
+            if transcription:
+                st.session_state.audio_processed = True
+                
+                with st.chat_message("user"):
+                    st.write(f"🎤 {transcription}")
+                
+                with st.chat_message("assistant"):
+                    with st.spinner("💭 En train de réfléchir..."):
+                        assistant_response = process_message(transcription)
+                        
+                        if assistant_response:
+                            st.write(assistant_response)
+                            
+                            # Générer et jouer l'audio
+                            if enable_tts:
+                                with st.spinner("🔊 Génération audio..."):
+                                    audio_bytes = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
+                                    if audio_bytes:
+                                        audio_key = f"audio_{len(st.session_state.messages)-1}"
+                                        st.session_state[audio_key] = audio_bytes
+                                        audio_html = create_audio_player(audio_bytes, auto_play=auto_play if 'auto_play' in locals() else True)
+                                        if audio_html:
+                                            st.markdown(audio_html, unsafe_allow_html=True)
+        
+        except Exception as e:
+            st.error(f"❌ Erreur de transcription: {str(e)}")
+
+# Réinitialiser le flag audio après traitement
+if st.session_state.audio_processed:
+    st.session_state.audio_processed = False
+
+# Afficher les corrections récentes dans un expander
+if st.session_state.corrections:
+    with st.expander("📝 Corrections récentes"):
+        for corr in reversed(st.session_state.corrections[-5:]):
+            st.markdown(f"**[{corr['timestamp']}]** Vous: _{corr['user_message']}_")
+            st.markdown(f"{corr['correction']}")
+            st.divider()
+
+# Résumé de la conversation actuelle
+if len(st.session_state.messages) > 0:
+    with st.expander("📊 Résumé de cette conversation"):
+        st.markdown(f"""
+        - **Messages échangés:** {len(st.session_state.messages)} ({len([m for m in st.session_state.messages if m['role'] == 'user'])} de vous)
+        - **Corrections reçues:** {len(st.session_state.corrections)}
+        - **Niveau:** {level}
+        - **Sujet:** {selected_topic}
+        - **Durée approximative:** ~{len(st.session_state.messages) * 30} secondes
+        """)
+        
+        if not st.session_state.conversation_title:
+            st.info("💡 N'oubliez pas de sauvegarder cette conversation dans la barre latérale !")
+        else:
+            st.success(f"✅ Cette conversation est sauvegardée sous le titre: '{st.session_state.conversation_title}'")
+
+# Section d'aide en bas
+with st.expander("ℹ️ Comment utiliser cette application"):
+    st.markdown("""
+    **Conseils pour bien pratiquer:**
+    
+    1. **Soyez naturel**: Écrivez ou parlez comme vous le feriez normalement
+    2. **Ne vous inquiétez pas des erreurs**: C'est en faisant des erreurs qu'on apprend !
+    3. **Utilisez les sujets suggérés**: Ils vous aident à démarrer une conversation
+    4. **Relisez les corrections**: Elles sont sauvegardées dans la section "Corrections récentes"
+    5. **Pratiquez régulièrement**: 10-15 minutes par jour font une grande différence
+    6. **Écoutez les réponses**: Activez l'audio pour améliorer votre compréhension orale
+    
+    **Fonctionnalités:**
+    - ✅ Conversations naturelles en anglais
+    - ✅ 🎤 Reconnaissance vocale (parlez en anglais!)
+    - ✅ 🔊 Réponses audio (écoutez l'anglais!)
+    - ✅ 💾 Sauvegarde des conversations
+    - ✅ 📥 Export en JSON
+    - ✅ 📚 Historique des conversations
+    - ✅ Corrections grammaticales douces
+    - ✅ Questions pour maintenir la conversation
+    - ✅ Adaptation à votre niveau
+    - ✅ Sujets variés du quotidien
+    - ✅ 100% GRATUIT (Groq + gTTS)
+    
+    **Utiliser le micro:**
+    - Cliquez sur "🎤 Parler" pour commencer l'enregistrement
+    - Parlez en anglais
+    - Cliquez sur "⏹️ Stop" pour terminer
+    - Votre parole sera transcrite et vous recevrez une réponse audio!
+    
+    **Options audio:**
+    - Activez/désactivez les réponses audio dans la barre latérale
+    - Choisissez parmi 6 voix différentes
+    - Lecture automatique ou manuelle
+    
+    **Sauvegarde:**
+    - 💾 Sauvegardez vos conversations dans l'application
+    - 📥 Exportez-les en JSON pour les garder localement
+    - 📚 Consultez votre historique à tout moment
+    - 👁️ Rechargez une ancienne conversation pour la continuer
+    - 🗑️ Supprimez les conversations dont vous n'avez plus besoin
     """)
 
-# Initialiser l'état
-if 'conversation_history' not in st.session_state:
-    st.session_state.conversation_history = []
-if 'corrections' not in st.session_state:
-    st.session_state.corrections = []
-
-# Interface en deux colonnes
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    # Zone de conversation
-    st.subheader("💬 Conversation")
-    
-    # Afficher messages
-    if not st.session_state.conversation_history:
-        st.info("💭 Start by saying hello! Use the microphone or type below.")
-    
-    for msg in st.session_state.conversation_history:
-        if msg["role"] == "user":
-            st.markdown(f"""
-            <div style="background-color: #E3F2FD; padding: 12px; border-radius: 10px; margin: 8px 0; text-align: right;">
-                <strong>You:</strong> {msg['content']}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="background-color: #F3F4F6; padding: 12px; border-radius: 10px; margin: 8px 0;">
-                <strong>Assistant:</strong> {msg['content']}
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Afficher corrections
-    if st.session_state.corrections:
-        st.subheader("📝 Corrections")
-        for correction in st.session_state.corrections[-2:]:
-            st.warning(correction)
-
-with col2:
-    # Zone d'entrée
-    st.subheader("🎤 Your Turn")
-    
-    # Option 1: Audio
-    audio_data = st.audio_input(
-        "Speak in English",
-        key="audio_input"
-    )
-    
-    # Option 2: Texte
-    user_text = st.text_area(
-        "Or type your message:",
-        height=120,
-        placeholder="Hello! How are you today?",
-        label_visibility="collapsed"
-    )
-    
-    # Bouton d'envoi
-    if st.button("🚀 Send Message", type="primary", use_container_width=True):
-        user_input = ""
-        
-        # Priorité à l'audio
-        if audio_data:
-            with st.spinner("🎤 Listening..."):
-                user_input = transcribe_audio(audio_data)
-                if user_input and "Error" not in user_input:
-                    st.success("✅ Transcribed!")
-        
-        # Sinon texte
-        if not user_input and user_text:
-            user_input = user_text
-        
-        if user_input:
-            # Ajouter à l'historique
-            st.session_state.conversation_history.append({
-                "role": "user",
-                "content": user_input
-            })
-            
-            # Vérifier grammaire si activé
-            if st.session_state.get('correct_grammar', True):
-                correction = check_grammar(user_input)
-                if correction:
-                    st.session_state.corrections.append(correction)
-            
-            # Obtenir réponse
-            with st.spinner("💭 Thinking..."):
-                response = get_ai_response(
-                    user_input,
-                    conversation_topic,
-                    difficulty_level
-                )
-                
-                # Ajouter réponse
-                st.session_state.conversation_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
-                
-                # Générer audio
-                lang_code = voice_options[selected_voice]
-                slow = st.session_state.get('slow_speech', False)
-                
-                audio_file = text_to_speech_simple(
-                    response,
-                    lang=lang_code,
-                    slow=slow
-                )
-                
-                # Jouer audio
-                if audio_file:
-                    st.audio(audio_file, format='audio/mp3')
-                    
-                    # Option téléchargement
-                    with open(audio_file, "rb") as f:
-                        audio_bytes = f.read()
-                    
-                    st.download_button(
-                        "📥 Download Audio",
-                        data=audio_bytes,
-                        file_name="english_response.mp3",
-                        mime="audio/mp3",
-                        use_container_width=True
-                    )
-            
-            st.rerun()
-
-# Section exercices
-st.divider()
-st.subheader("💪 Practice Exercises")
-
-# Cards d'exercices
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    if st.button("🎯 Daily Phrase", use_container_width=True):
-        response = get_ai_response(
-            "Give me one useful English phrase with explanation",
-            "Vocabulary",
-            difficulty_level
-        )
-        st.info(response)
-
-with col2:
-    if st.button("📚 Grammar Quiz", use_container_width=True):
-        response = get_ai_response(
-            "Create a short grammar quiz with 2 questions",
-            "Grammar",
-            difficulty_level
-        )
-        st.info(response)
-
-with col3:
-    if st.button("🗣️ Pronunciation", use_container_width=True):
-        response = get_ai_response(
-            "Give me a sentence to practice pronunciation",
-            "Pronunciation",
-            difficulty_level
-        )
-        st.info(response)
-        
-        # Dire lentement
-        if response:
-            audio_file = text_to_speech_simple(
-                f"Repeat after me: {response}",
-                lang='en',
-                slow=True
-            )
-            if audio_file:
-                st.audio(audio_file, format='audio/mp3')
-
-# Pied de page
-st.divider()
-st.caption("⚡ Powered by Groq AI • 🆓 Free to use • 🗣️ Practice English daily")
+# Footer
+st.markdown("---")
+st.markdown(
+    "<div style='text-align: center; color: gray;'>"
+    "💡 Application 100% gratuite - Propulsée par Groq + gTTS 🚀<br>"
+    "🎤 Reconnaissance vocale + 🔊 Synthèse vocale + 💾 Sauvegarde incluses"
+    "</div>",
+    unsafe_allow_html=True
+)
