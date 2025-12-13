@@ -1,11 +1,16 @@
 import streamlit as st
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_mic_recorder import mic_recorder
 import base64
 import os
 from pathlib import Path
+import sqlite3
+import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
+from collections import Counter
 
 # Configuration de la page
 st.set_page_config(
@@ -17,6 +22,189 @@ st.set_page_config(
 # Dossier pour sauvegarder les conversations
 SAVE_DIR = Path("saved_conversations")
 SAVE_DIR.mkdir(exist_ok=True)
+
+# Base de données SQLite
+DB_PATH = Path("conversations.db")
+
+# Initialiser la base de données
+def init_database():
+    """Crée la base de données et les tables si elles n'existent pas"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            date_created TEXT NOT NULL,
+            date_modified TEXT NOT NULL,
+            level TEXT,
+            topic TEXT,
+            message_count INTEGER DEFAULT 0,
+            correction_count INTEGER DEFAULT 0,
+            messages_json TEXT,
+            corrections_json TEXT,
+            file_path TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS statistics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            messages_sent INTEGER DEFAULT 0,
+            corrections_received INTEGER DEFAULT 0,
+            time_practiced INTEGER DEFAULT 0,
+            topics_practiced TEXT
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
+
+# Fonctions de base de données
+def save_to_database(conversation_data):
+    """Sauvegarde une conversation dans la base de données"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("""
+            INSERT INTO conversations 
+            (title, date_created, date_modified, level, topic, message_count, 
+             correction_count, messages_json, corrections_json, file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            conversation_data['title'],
+            conversation_data['date'],
+            now,
+            conversation_data['level'],
+            conversation_data['topic'],
+            conversation_data['message_count'],
+            len(conversation_data['corrections']),
+            json.dumps(conversation_data['messages']),
+            json.dumps(conversation_data['corrections']),
+            conversation_data.get('file_path', '')
+        ))
+        
+        conv_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        return True, conv_id
+    except Exception as e:
+        return False, str(e)
+
+def load_from_database():
+    """Charge toutes les conversations depuis la base de données"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id, title, date_created, level, topic, message_count, 
+                   correction_count, messages_json, corrections_json, file_path
+            FROM conversations
+            ORDER BY date_modified DESC
+        """)
+        
+        conversations = []
+        for row in cursor.fetchall():
+            conversations.append({
+                'id': row[0],
+                'title': row[1],
+                'date': row[2],
+                'level': row[3],
+                'topic': row[4],
+                'message_count': row[5],
+                'correction_count': row[6],
+                'messages': json.loads(row[7]),
+                'corrections': json.loads(row[8]),
+                'file_path': row[9]
+            })
+        
+        conn.close()
+        return conversations
+    except Exception as e:
+        st.error(f"Erreur de chargement DB: {e}")
+        return []
+
+def delete_from_database(conv_id):
+    """Supprime une conversation de la base de données"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Erreur de suppression: {e}")
+        return False
+
+def get_statistics():
+    """Récupère les statistiques globales"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Stats globales
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_conversations,
+                SUM(message_count) as total_messages,
+                SUM(correction_count) as total_corrections,
+                COUNT(DISTINCT level) as levels_practiced,
+                COUNT(DISTINCT topic) as topics_practiced
+            FROM conversations
+        """)
+        
+        stats = cursor.fetchone()
+        
+        # Stats par niveau
+        cursor.execute("""
+            SELECT level, COUNT(*) as count, SUM(message_count) as messages
+            FROM conversations
+            GROUP BY level
+        """)
+        level_stats = cursor.fetchall()
+        
+        # Stats par sujet
+        cursor.execute("""
+            SELECT topic, COUNT(*) as count
+            FROM conversations
+            GROUP BY topic
+            ORDER BY count DESC
+            LIMIT 10
+        """)
+        topic_stats = cursor.fetchall()
+        
+        # Stats temporelles (derniers 30 jours)
+        cursor.execute("""
+            SELECT DATE(date_created) as date, COUNT(*) as count, SUM(message_count) as messages
+            FROM conversations
+            WHERE date_created >= date('now', '-30 days')
+            GROUP BY DATE(date_created)
+            ORDER BY date
+        """)
+        time_stats = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            'global': stats,
+            'by_level': level_stats,
+            'by_topic': topic_stats,
+            'timeline': time_stats
+        }
+    except Exception as e:
+        st.error(f"Erreur stats: {e}")
+        return None
+
+# Initialiser la base de données au démarrage
+init_database()
 
 # Fonction pour charger les conversations sauvegardées
 def load_saved_conversations():
@@ -83,7 +271,7 @@ if "current_file_path" not in st.session_state:
     st.session_state.current_file_path = None
 
 # Charger les conversations sauvegardées au démarrage
-saved_conversations = load_saved_conversations()
+saved_conversations = load_from_database()
 
 # Titre et description
 st.title("🗣️ English Conversation Practice")
@@ -93,229 +281,330 @@ st.markdown("### Pratiquez votre anglais avec une conversation naturelle - 100% 
 with st.sidebar:
     st.header("⚙️ Paramètres")
     
-    # Choix du service gratuit
-    service = st.radio(
-        "Service d'IA (gratuit)",
-        ["Groq (Recommandé)", "Hugging Face"],
-        help="Groq est plus rapide et performant"
+    # Navigation par onglets
+    tab = st.radio(
+        "Navigation",
+        ["💬 Conversation", "📊 Statistiques", "💾 Sauvegardes"],
+        label_visibility="collapsed"
     )
     
-    # Clé API selon le service
-    if service == "Groq (Recommandé)":
-        st.info("🎉 Groq offre une API gratuite avec 14,400 requêtes/jour !")
-        api_key = st.text_input(
-            "Clé API Groq (gratuite)",
-            type="password",
-            help="Obtenez votre clé sur console.groq.com"
-        )
-        st.markdown("[📝 Obtenir une clé Groq gratuite](https://console.groq.com)")
-        
-        # Aide pour vérifier la clé
-        with st.expander("❓ Problème avec la clé API ?"):
-            st.markdown("""
-            **Si la transcription audio ne fonctionne pas:**
-            
-            1. **Vérifiez votre clé:**
-               - Allez sur [console.groq.com](https://console.groq.com)
-               - Cliquez sur "API Keys"
-               - Vérifiez que votre clé est active
-            
-            2. **Créez une nouvelle clé:**
-               - Cliquez sur "Create API Key"
-               - Donnez-lui un nom
-               - Copiez la clé complète (commence par `gsk_...`)
-               - Collez-la dans le champ ci-dessus
-            
-            3. **Vérifiez le format:**
-               - La clé doit commencer par `gsk_`
-               - Elle fait environ 50-60 caractères
-               - Pas d'espaces avant/après
-            
-            4. **En attendant:**
-               - Vous pouvez taper vos messages au lieu de parler
-               - Les réponses audio fonctionneront toujours
-            """)
-    else:
-        st.info("🤗 Hugging Face offre une API gratuite !")
-        api_key = st.text_input(
-            "Clé API Hugging Face (gratuite)",
-            type="password",
-            help="Obtenez votre clé sur huggingface.co"
-        )
-        st.markdown("[📝 Obtenir une clé HF gratuite](https://huggingface.co/settings/tokens)")
+    st.divider()
     
-    # Option audio
-    st.subheader("🔊 Options Audio")
-    enable_tts = st.checkbox(
-        "Activer les réponses audio",
-        value=True,
-        help="L'IA vous répondra en audio"
-    )
-    
-    if enable_tts:
-        voice_choice = st.selectbox(
-            "Voix",
-            ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-            index=4,
-            help="Choisissez la voix de l'assistant"
+    # Onglet Conversation
+    if tab == "💬 Conversation":
+    # Onglet Conversation
+    if tab == "💬 Conversation":
+        # Choix du service gratuit
+        service = st.radio(
+            "Service d'IA (gratuit)",
+            ["Groq (Recommandé)", "Hugging Face"],
+            help="Groq est plus rapide et performant"
         )
         
-        auto_play = st.checkbox(
-            "Lecture automatique",
+        # Clé API selon le service
+        if service == "Groq (Recommandé)":
+            st.info("🎉 Groq offre une API gratuite avec 14,400 requêtes/jour !")
+            api_key = st.text_input(
+                "Clé API Groq (gratuite)",
+                type="password",
+                help="Obtenez votre clé sur console.groq.com"
+            )
+            st.markdown("[📝 Obtenir une clé Groq gratuite](https://console.groq.com)")
+            
+            # Aide pour vérifier la clé
+            with st.expander("❓ Problème avec la clé API ?"):
+                st.markdown("""
+                **Si la transcription audio ne fonctionne pas:**
+                
+                1. **Vérifiez votre clé:**
+                   - Allez sur [console.groq.com](https://console.groq.com)
+                   - Cliquez sur "API Keys"
+                   - Vérifiez que votre clé est active
+                
+                2. **Créez une nouvelle clé:**
+                   - Cliquez sur "Create API Key"
+                   - Donnez-lui un nom
+                   - Copiez la clé complète (commence par `gsk_...`)
+                   - Collez-la dans le champ ci-dessus
+                
+                3. **Vérifiez le format:**
+                   - La clé doit commencer par `gsk_`
+                   - Elle fait environ 50-60 caractères
+                   - Pas d'espaces avant/après
+                
+                4. **En attendant:**
+                   - Vous pouvez taper vos messages au lieu de parler
+                   - Les réponses audio fonctionneront toujours
+                """)
+        else:
+            st.info("🤗 Hugging Face offre une API gratuite !")
+            api_key = st.text_input(
+                "Clé API Hugging Face (gratuite)",
+                type="password",
+                help="Obtenez votre clé sur huggingface.co"
+            )
+            st.markdown("[📝 Obtenir une clé HF gratuite](https://huggingface.co/settings/tokens)")
+        
+        # Option audio
+        st.subheader("🔊 Options Audio")
+        enable_tts = st.checkbox(
+            "Activer les réponses audio",
             value=True,
-            help="Jouer l'audio automatiquement"
-        )
-    
-    # Niveau d'anglais
-    level = st.selectbox(
-        "Votre niveau d'anglais",
-        ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"]
-    )
-    
-    # Sujets de conversation
-    st.subheader("📚 Sujets suggérés")
-    topics = [
-        "Daily routines", "Hobbies", "Travel", "Food & Cooking",
-        "Movies & TV", "Work & Career", "Family & Friends",
-        "Weather", "Technology", "Sports"
-    ]
-    selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics)
-    
-    # Statistiques
-    st.subheader("📊 Statistiques")
-    st.metric("Messages envoyés", st.session_state.conversation_count)
-    st.metric("Corrections reçues", len(st.session_state.corrections))
-    
-    # Sauvegarde de conversation
-    st.subheader("💾 Sauvegarde")
-    
-    if len(st.session_state.messages) > 0:
-        conv_title = st.text_input(
-            "Titre de la conversation",
-            value=st.session_state.conversation_title,
-            placeholder="Ex: Ma première conversation"
+            help="L'IA vous répondra en audio"
         )
         
-        col_save1, col_save2 = st.columns(2)
-        
-        with col_save1:
-            if st.button("💾 Sauvegarder", use_container_width=True):
-                if conv_title.strip():
-                    conversation_data = {
-                        "title": conv_title,
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "level": level,
-                        "topic": selected_topic,
-                        "messages": st.session_state.messages.copy(),
-                        "corrections": st.session_state.corrections.copy(),
-                        "message_count": st.session_state.conversation_count
-                    }
-                    
-                    success, result = save_conversation(conversation_data)
-                    
-                    if success:
-                        st.session_state.conversation_title = conv_title
-                        st.session_state.current_file_path = str(result)
-                        st.success(f"✅ Sauvegardé dans: {result.name}")
-                        st.rerun()
-                    else:
-                        st.error(f"❌ Erreur de sauvegarde: {result}")
-                else:
-                    st.error("⚠️ Donnez un titre à la conversation")
-        
-        with col_save2:
-            # Télécharger en JSON
-            if st.session_state.messages:
-                conversation_json = json.dumps({
-                    "title": conv_title or "Conversation sans titre",
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "level": level,
-                    "topic": selected_topic,
-                    "messages": st.session_state.messages,
-                    "corrections": st.session_state.corrections
-                }, indent=2, ensure_ascii=False)
-                
-                st.download_button(
-                    label="📥 Télécharger",
-                    data=conversation_json,
-                    file_name=f"conversation_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
-    
-    # Historique des conversations
-    if len(saved_conversations) > 0:
-        st.subheader(f"📚 Conversations ({len(saved_conversations)})")
-        
-        # Option de recherche
-        search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...")
-        
-        # Filtrer les conversations
-        filtered_convs = saved_conversations
-        if search_term:
-            filtered_convs = [
-                conv for conv in saved_conversations 
-                if search_term.lower() in conv['title'].lower() 
-                or search_term.lower() in conv.get('topic', '').lower()
-            ]
-        
-        for idx, conv in enumerate(filtered_convs):
-            # Indiquer si c'est la conversation actuelle
-            is_current = st.session_state.current_file_path == conv.get('file_path')
-            title_prefix = "🟢 " if is_current else "📝 "
+        if enable_tts:
+            voice_choice = st.selectbox(
+                "Voix",
+                ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                index=4,
+                help="Choisissez la voix de l'assistant"
+            )
             
-            with st.expander(f"{title_prefix}{conv['title']} - {conv['date'][:16]}"):
-                st.markdown(f"**Niveau:** {conv['level']}")
-                st.markdown(f"**Sujet:** {conv['topic']}")
-                st.markdown(f"**Messages:** {conv['message_count']}")
-                st.markdown(f"**Corrections:** {len(conv['corrections'])}")
-                
-                if is_current:
-                    st.info("🟢 C'est la conversation actuelle")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    if st.button("👁️ Charger", key=f"view_{idx}"):
-                        st.session_state.messages = conv['messages'].copy()
-                        st.session_state.corrections = conv['corrections'].copy()
-                        st.session_state.conversation_count = conv['message_count']
-                        st.session_state.conversation_title = conv['title']
-                        st.session_state.current_file_path = conv.get('file_path')
-                        st.rerun()
-                
-                with col2:
-                    conv_json = json.dumps(conv, indent=2, ensure_ascii=False)
-                    st.download_button(
-                        label="📥 Export",
-                        data=conv_json,
-                        file_name=f"{conv['title'].replace(' ', '_')}.json",
-                        mime="application/json",
-                        key=f"download_{idx}"
-                    )
-                
-                with col3:
-                    if st.button("🗑️ Supprimer", key=f"delete_{idx}"):
-                        if delete_conversation(conv.get('file_path')):
-                            st.success("✅ Conversation supprimée")
-                            # Si on supprime la conversation actuelle, réinitialiser
-                            if is_current:
-                                st.session_state.current_file_path = None
-                            st.rerun()
-    else:
-        st.info("📚 Aucune conversation sauvegardée pour le moment")
+            auto_play = st.checkbox(
+                "Lecture automatique",
+                value=True,
+                help="Jouer l'audio automatiquement"
+            )
+        
+        # Niveau d'anglais
+        level = st.selectbox(
+            "Votre niveau d'anglais",
+            ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"]
+        )
+        
+        # Sujets de conversation
+        st.subheader("📚 Sujets suggérés")
+        topics = [
+            "Daily routines", "Hobbies", "Travel", "Food & Cooking",
+            "Movies & TV", "Work & Career", "Family & Friends",
+            "Weather", "Technology", "Sports"
+        ]
+        selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics)
+        
+        # Statistiques de session
+        st.subheader("📊 Session actuelle")
+        st.metric("Messages envoyés", st.session_state.conversation_count)
+        st.metric("Corrections reçues", len(st.session_state.corrections))
+        
+        # Bouton pour nouvelle conversation
+        if st.button("🔄 Nouvelle conversation", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.corrections = []
+            st.session_state.audio_processed = False
+            st.session_state.conversation_title = ""
+            st.session_state.current_file_path = None
+            st.rerun()
     
-    # Bouton pour réinitialiser
-    if st.button("🔄 Nouvelle conversation"):
-        st.session_state.messages = []
-        st.session_state.corrections = []
-        st.session_state.audio_processed = False
-        st.session_state.conversation_title = ""
-        st.session_state.current_file_path = None
-        st.rerun()
+    # Onglet Statistiques
+    elif tab == "📊 Statistiques":
+        st.subheader("📈 Vos statistiques")
+        
+        stats = get_statistics()
+        
+        if stats and stats['global'][0] > 0:
+            total_conv, total_msg, total_corr, levels, topics = stats['global']
+            
+            # Métriques principales
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Conversations", total_conv)
+                st.metric("Messages envoyés", total_msg or 0)
+            with col2:
+                st.metric("Corrections", total_corr or 0)
+                st.metric("Sujets explorés", topics)
+            
+            # Graphique par niveau
+            if stats['by_level']:
+                st.markdown("**📊 Par niveau**")
+                level_df = pd.DataFrame(stats['by_level'], columns=['Niveau', 'Conversations', 'Messages'])
+                fig_level = px.bar(level_df, x='Niveau', y='Conversations', 
+                                  color='Messages', color_continuous_scale='Blues')
+                st.plotly_chart(fig_level, use_container_width=True)
+            
+            # Top sujets
+            if stats['by_topic']:
+                st.markdown("**🎯 Sujets favoris**")
+                topic_df = pd.DataFrame(stats['by_topic'], columns=['Sujet', 'Conversations'])
+                fig_topic = px.pie(topic_df, names='Sujet', values='Conversations')
+                st.plotly_chart(fig_topic, use_container_width=True)
+            
+            # Timeline
+            if stats['timeline']:
+                st.markdown("**📅 Activité (30 derniers jours)**")
+                time_df = pd.DataFrame(stats['timeline'], columns=['Date', 'Conversations', 'Messages'])
+                fig_time = go.Figure()
+                fig_time.add_trace(go.Scatter(x=time_df['Date'], y=time_df['Conversations'],
+                                              mode='lines+markers', name='Conversations'))
+                st.plotly_chart(fig_time, use_container_width=True)
+            
+            # Calcul de la moyenne
+            if total_conv > 0:
+                avg_msg = total_msg / total_conv
+                avg_corr = total_corr / total_conv
+                st.markdown(f"""
+                **📊 Moyennes par conversation:**
+                - Messages: {avg_msg:.1f}
+                - Corrections: {avg_corr:.1f}
+                """)
+        else:
+            st.info("📊 Commencez à pratiquer pour voir vos statistiques !")
+            st.markdown("""
+            Vos statistiques apparaîtront ici après vos premières conversations:
+            - Nombre total de conversations
+            - Messages envoyés
+            - Corrections reçues
+            - Progression dans le temps
+            - Sujets favoris
+            """)
+    
+    # Onglet Sauvegardes
+    elif tab == "💾 Sauvegardes":
+    
+    # Onglet Sauvegardes
+    elif tab == "💾 Sauvegardes":
+        # Sauvegarde de conversation
+        st.subheader("💾 Sauvegarder")
+        
+        if len(st.session_state.messages) > 0:
+            conv_title = st.text_input(
+                "Titre de la conversation",
+                value=st.session_state.conversation_title,
+                placeholder="Ex: Ma première conversation"
+            )
+            
+            col_save1, col_save2 = st.columns(2)
+            
+            with col_save1:
+                if st.button("💾 Sauvegarder", use_container_width=True):
+                    if conv_title.strip():
+                        conversation_data = {
+                            "title": conv_title,
+                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "level": level if 'level' in locals() else "Non spécifié",
+                            "topic": selected_topic if 'selected_topic' in locals() else "Libre",
+                            "messages": st.session_state.messages.copy(),
+                            "corrections": st.session_state.corrections.copy(),
+                            "message_count": st.session_state.conversation_count
+                        }
+                        
+                        # Sauvegarder dans le fichier
+                        success_file, result = save_conversation(conversation_data)
+                        
+                        # Sauvegarder dans la base de données
+                        if success_file:
+                            conversation_data['file_path'] = str(result)
+                            success_db, conv_id = save_to_database(conversation_data)
+                            
+                            if success_db:
+                                st.session_state.conversation_title = conv_title
+                                st.session_state.current_file_path = str(result)
+                                st.success(f"✅ Sauvegardé (ID: {conv_id})")
+                                st.rerun()
+                            else:
+                                st.warning(f"⚠️ Fichier sauvegardé mais erreur DB: {conv_id}")
+                        else:
+                            st.error(f"❌ Erreur: {result}")
+                    else:
+                        st.error("⚠️ Donnez un titre à la conversation")
+            
+            with col_save2:
+                # Télécharger en JSON
+                if st.session_state.messages:
+                    conversation_json = json.dumps({
+                        "title": conv_title or "Conversation sans titre",
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "level": level if 'level' in locals() else "Non spécifié",
+                        "topic": selected_topic if 'selected_topic' in locals() else "Libre",
+                        "messages": st.session_state.messages,
+                        "corrections": st.session_state.corrections
+                    }, indent=2, ensure_ascii=False)
+                    
+                    st.download_button(
+                        label="📥 Export JSON",
+                        data=conversation_json,
+                        file_name=f"conversation_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+        else:
+            st.info("💬 Commencez une conversation pour pouvoir la sauvegarder")
+        
+        st.divider()
+        
+        # Historique des conversations
+        if len(saved_conversations) > 0:
+            st.subheader(f"📚 Historique ({len(saved_conversations)})")
+            
+            # Option de recherche
+            search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...")
+            
+            # Filtrer les conversations
+            filtered_convs = saved_conversations
+            if search_term:
+                filtered_convs = [
+                    conv for conv in saved_conversations 
+                    if search_term.lower() in conv['title'].lower() 
+                    or search_term.lower() in conv.get('topic', '').lower()
+                ]
+            
+            st.caption(f"Affichage: {len(filtered_convs)} conversation(s)")
+            
+            for idx, conv in enumerate(filtered_convs):
+                # Indiquer si c'est la conversation actuelle
+                is_current = st.session_state.current_file_path == conv.get('file_path')
+                title_prefix = "🟢 " if is_current else "📝 "
+                
+                with st.expander(f"{title_prefix}{conv['title']} - {conv['date'][:16]}"):
+                    st.markdown(f"**Niveau:** {conv.get('level', 'N/A')}")
+                    st.markdown(f"**Sujet:** {conv.get('topic', 'N/A')}")
+                    st.markdown(f"**Messages:** {conv.get('message_count', 0)}")
+                    st.markdown(f"**Corrections:** {conv.get('correction_count', len(conv.get('corrections', [])))}")
+                    
+                    if is_current:
+                        st.info("🟢 C'est la conversation actuelle")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("👁️ Charger", key=f"view_{conv['id']}"):
+                            st.session_state.messages = conv['messages'].copy()
+                            st.session_state.corrections = conv['corrections'].copy()
+                            st.session_state.conversation_count = conv.get('message_count', len(conv['messages']))
+                            st.session_state.conversation_title = conv['title']
+                            st.session_state.current_file_path = conv.get('file_path')
+                            st.rerun()
+                    
+                    with col2:
+                        conv_json = json.dumps(conv, indent=2, ensure_ascii=False)
+                        st.download_button(
+                            label="📥",
+                            data=conv_json,
+                            file_name=f"{conv['title'].replace(' ', '_')}.json",
+                            mime="application/json",
+                            key=f"download_{conv['id']}"
+                        )
+                    
+                    with col3:
+                        if st.button("🗑️", key=f"delete_{conv['id']}"):
+                            # Supprimer de la BD
+                            if delete_from_database(conv['id']):
+                                # Supprimer le fichier si existe
+                                if conv.get('file_path') and Path(conv['file_path']).exists():
+                                    delete_conversation(conv['file_path'])
+                                
+                                # Si on supprime la conversation actuelle
+                                if is_current:
+                                    st.session_state.current_file_path = None
+                                
+                                st.success("✅ Supprimée")
+                                st.rerun()
+        else:
+            st.info("📚 Aucune conversation sauvegardée")
 
 # Vérification de la clé API
 if not api_key:
+    st.warning("⚠️ Veuillez entrer votre clé API gratuite dans la barre latérale (onglet 💬 Conversation).")
     st.warning("⚠️ Veuillez entrer votre clé API gratuite dans la barre latérale pour commencer.")
     
     col1, col2 = st.columns(2)
@@ -756,9 +1045,12 @@ with st.expander("ℹ️ Comment utiliser cette application"):
     - ✅ Conversations naturelles en anglais
     - ✅ 🎤 Reconnaissance vocale (parlez en anglais!)
     - ✅ 🔊 Réponses audio (écoutez l'anglais!)
-    - ✅ 💾 Sauvegarde des conversations
+    - ✅ 💾 Double sauvegarde (Fichiers + Base de données SQLite)
     - ✅ 📥 Export en JSON
-    - ✅ 📚 Historique des conversations
+    - ✅ 📚 Historique permanent des conversations
+    - ✅ 📊 Statistiques détaillées et graphiques
+    - ✅ 📈 Suivi de progression dans le temps
+    - ✅ 🔍 Recherche dans l'historique
     - ✅ Corrections grammaticales douces
     - ✅ Questions pour maintenir la conversation
     - ✅ Adaptation à votre niveau
@@ -777,13 +1069,20 @@ with st.expander("ℹ️ Comment utiliser cette application"):
     - Lecture automatique ou manuelle
     
     **Sauvegarde:**
-    - 💾 Sauvegardez vos conversations sur le disque (persistant)
-    - 📥 Exportez-les en JSON pour les partager
-    - 📚 Consultez votre historique à tout moment (même après fermeture)
+    - 💾 Double sauvegarde (Fichiers JSON + Base de données SQLite)
+    - 📥 Exportez en JSON pour partager ou sauvegarder ailleurs
+    - 📚 Historique permanent (même après redémarrage)
     - 👁️ Rechargez une ancienne conversation pour la continuer
     - 🗑️ Supprimez les conversations dont vous n'avez plus besoin
-    - 🔍 Recherchez dans vos conversations sauvegardées
+    - 🔍 Recherchez dans votre historique
     - 🟢 Voyez quelle conversation est actuellement active
+    
+    **Statistiques:**
+    - 📊 Graphiques de progression
+    - 📈 Timeline de votre activité (30 derniers jours)
+    - 🎯 Vos sujets favoris
+    - 📉 Répartition par niveau de difficulté
+    - 🔢 Moyennes de messages et corrections par conversation
     """)
 
 # Footer
@@ -791,7 +1090,7 @@ st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
     "💡 Application 100% gratuite - Propulsée par Groq + gTTS 🚀<br>"
-    "🎤 Reconnaissance vocale + 🔊 Synthèse vocale + 💾 Sauvegarde incluses"
+    "🎤 Reconnaissance vocale + 🔊 Synthèse vocale + 💾 Sauvegarde + 📊 Statistiques"
     "</div>",
     unsafe_allow_html=True
 )
