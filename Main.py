@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from streamlit_mic_recorder import mic_recorder
 import base64
+import os
+from pathlib import Path
 
 # Configuration de la page
 st.set_page_config(
@@ -11,6 +13,60 @@ st.set_page_config(
     page_icon="🗣️",
     layout="wide"
 )
+
+# Dossier pour sauvegarder les conversations
+SAVE_DIR = Path("saved_conversations")
+SAVE_DIR.mkdir(exist_ok=True)
+
+# Fonction pour charger les conversations sauvegardées
+def load_saved_conversations():
+    """Charge toutes les conversations depuis le dossier de sauvegarde"""
+    conversations = []
+    if SAVE_DIR.exists():
+        for file_path in SAVE_DIR.glob("*.json"):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    conv = json.load(f)
+                    conv['file_path'] = str(file_path)
+                    conversations.append(conv)
+            except Exception as e:
+                st.error(f"Erreur lors du chargement de {file_path.name}: {e}")
+    
+    # Trier par date (plus récent en premier)
+    conversations.sort(key=lambda x: x.get('date', ''), reverse=True)
+    return conversations
+
+# Fonction pour sauvegarder une conversation
+def save_conversation(conversation_data):
+    """Sauvegarde une conversation dans un fichier JSON"""
+    try:
+        # Créer un nom de fichier unique
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = "".join(c for c in conversation_data['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_title = safe_title.replace(' ', '_')[:50]  # Limiter la longueur
+        filename = f"{timestamp}_{safe_title}.json"
+        file_path = SAVE_DIR / filename
+        
+        # Ajouter le chemin du fichier
+        conversation_data['file_path'] = str(file_path)
+        
+        # Sauvegarder
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+        
+        return True, file_path
+    except Exception as e:
+        return False, str(e)
+
+# Fonction pour supprimer une conversation
+def delete_conversation(file_path):
+    """Supprime une conversation du disque"""
+    try:
+        Path(file_path).unlink()
+        return True
+    except Exception as e:
+        st.error(f"Erreur lors de la suppression: {e}")
+        return False
 
 # Initialisation de la session
 if "messages" not in st.session_state:
@@ -21,10 +77,13 @@ if "conversation_count" not in st.session_state:
     st.session_state.conversation_count = 0
 if "audio_processed" not in st.session_state:
     st.session_state.audio_processed = False
-if "saved_conversations" not in st.session_state:
-    st.session_state.saved_conversations = []
 if "conversation_title" not in st.session_state:
     st.session_state.conversation_title = ""
+if "current_file_path" not in st.session_state:
+    st.session_state.current_file_path = None
+
+# Charger les conversations sauvegardées au démarrage
+saved_conversations = load_saved_conversations()
 
 # Titre et description
 st.title("🗣️ English Conversation Practice")
@@ -144,16 +203,23 @@ with st.sidebar:
                 if conv_title.strip():
                     conversation_data = {
                         "title": conv_title,
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "level": level,
                         "topic": selected_topic,
                         "messages": st.session_state.messages.copy(),
                         "corrections": st.session_state.corrections.copy(),
                         "message_count": st.session_state.conversation_count
                     }
-                    st.session_state.saved_conversations.append(conversation_data)
-                    st.session_state.conversation_title = conv_title
-                    st.success("✅ Conversation sauvegardée !")
+                    
+                    success, result = save_conversation(conversation_data)
+                    
+                    if success:
+                        st.session_state.conversation_title = conv_title
+                        st.session_state.current_file_path = str(result)
+                        st.success(f"✅ Sauvegardé dans: {result.name}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Erreur de sauvegarde: {result}")
                 else:
                     st.error("⚠️ Donnez un titre à la conversation")
         
@@ -162,7 +228,7 @@ with st.sidebar:
             if st.session_state.messages:
                 conversation_json = json.dumps({
                     "title": conv_title or "Conversation sans titre",
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "level": level,
                     "topic": selected_topic,
                     "messages": st.session_state.messages,
@@ -178,23 +244,44 @@ with st.sidebar:
                 )
     
     # Historique des conversations
-    if len(st.session_state.saved_conversations) > 0:
-        st.subheader("📚 Conversations sauvegardées")
+    if len(saved_conversations) > 0:
+        st.subheader(f"📚 Conversations ({len(saved_conversations)})")
         
-        for idx, conv in enumerate(reversed(st.session_state.saved_conversations)):
-            with st.expander(f"📝 {conv['title']} - {conv['date']}"):
+        # Option de recherche
+        search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...")
+        
+        # Filtrer les conversations
+        filtered_convs = saved_conversations
+        if search_term:
+            filtered_convs = [
+                conv for conv in saved_conversations 
+                if search_term.lower() in conv['title'].lower() 
+                or search_term.lower() in conv.get('topic', '').lower()
+            ]
+        
+        for idx, conv in enumerate(filtered_convs):
+            # Indiquer si c'est la conversation actuelle
+            is_current = st.session_state.current_file_path == conv.get('file_path')
+            title_prefix = "🟢 " if is_current else "📝 "
+            
+            with st.expander(f"{title_prefix}{conv['title']} - {conv['date'][:16]}"):
                 st.markdown(f"**Niveau:** {conv['level']}")
                 st.markdown(f"**Sujet:** {conv['topic']}")
                 st.markdown(f"**Messages:** {conv['message_count']}")
                 st.markdown(f"**Corrections:** {len(conv['corrections'])}")
                 
+                if is_current:
+                    st.info("🟢 C'est la conversation actuelle")
+                
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("👁️ Voir", key=f"view_{idx}"):
+                    if st.button("👁️ Charger", key=f"view_{idx}"):
                         st.session_state.messages = conv['messages'].copy()
                         st.session_state.corrections = conv['corrections'].copy()
                         st.session_state.conversation_count = conv['message_count']
+                        st.session_state.conversation_title = conv['title']
+                        st.session_state.current_file_path = conv.get('file_path')
                         st.rerun()
                 
                 with col2:
@@ -209,9 +296,14 @@ with st.sidebar:
                 
                 with col3:
                     if st.button("🗑️ Supprimer", key=f"delete_{idx}"):
-                        real_idx = len(st.session_state.saved_conversations) - 1 - idx
-                        st.session_state.saved_conversations.pop(real_idx)
-                        st.rerun()
+                        if delete_conversation(conv.get('file_path')):
+                            st.success("✅ Conversation supprimée")
+                            # Si on supprime la conversation actuelle, réinitialiser
+                            if is_current:
+                                st.session_state.current_file_path = None
+                            st.rerun()
+    else:
+        st.info("📚 Aucune conversation sauvegardée pour le moment")
     
     # Bouton pour réinitialiser
     if st.button("🔄 Nouvelle conversation"):
@@ -219,6 +311,7 @@ with st.sidebar:
         st.session_state.corrections = []
         st.session_state.audio_processed = False
         st.session_state.conversation_title = ""
+        st.session_state.current_file_path = None
         st.rerun()
 
 # Vérification de la clé API
@@ -642,7 +735,10 @@ if len(st.session_state.messages) > 0:
         if not st.session_state.conversation_title:
             st.info("💡 N'oubliez pas de sauvegarder cette conversation dans la barre latérale !")
         else:
-            st.success(f"✅ Cette conversation est sauvegardée sous le titre: '{st.session_state.conversation_title}'")
+            if st.session_state.current_file_path:
+                st.success(f"✅ Cette conversation est sauvegardée: '{st.session_state.conversation_title}'")
+            else:
+                st.warning(f"⚠️ Titre défini mais pas encore sauvegardé sur le disque")
 
 # Section d'aide en bas
 with st.expander("ℹ️ Comment utiliser cette application"):
@@ -681,11 +777,13 @@ with st.expander("ℹ️ Comment utiliser cette application"):
     - Lecture automatique ou manuelle
     
     **Sauvegarde:**
-    - 💾 Sauvegardez vos conversations dans l'application
-    - 📥 Exportez-les en JSON pour les garder localement
-    - 📚 Consultez votre historique à tout moment
+    - 💾 Sauvegardez vos conversations sur le disque (persistant)
+    - 📥 Exportez-les en JSON pour les partager
+    - 📚 Consultez votre historique à tout moment (même après fermeture)
     - 👁️ Rechargez une ancienne conversation pour la continuer
     - 🗑️ Supprimez les conversations dont vous n'avez plus besoin
+    - 🔍 Recherchez dans vos conversations sauvegardées
+    - 🟢 Voyez quelle conversation est actuellement active
     """)
 
 # Footer
