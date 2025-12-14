@@ -306,7 +306,8 @@ with st.sidebar:
         service = st.radio(
             "Service d'IA (gratuit)",
             ["Groq (Recommandé)", "Hugging Face"],
-            help="Groq est plus rapide et performant"
+            help="Groq est plus rapide et performant",
+            key="service_choice"
         )
     # Onglet Conversation
     if tab == "💬 Conversation":
@@ -366,7 +367,8 @@ with st.sidebar:
         enable_tts = st.checkbox(
             "Activer les réponses audio",
             value=True,
-            help="L'IA vous répondra en audio"
+            help="L'IA vous répondra en audio",
+            key="enable_tts"
         )
         
         if enable_tts:
@@ -374,19 +376,22 @@ with st.sidebar:
                 "Voix",
                 ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
                 index=4,
-                help="Choisissez la voix de l'assistant"
+                help="Choisissez la voix de l'assistant",
+                key="voice_selection"
             )
             
             auto_play = st.checkbox(
                 "Lecture automatique",
                 value=True,
-                help="Jouer l'audio automatiquement"
+                help="Jouer l'audio automatiquement",
+                key="auto_play_option"
             )
         
         # Niveau d'anglais
         level = st.selectbox(
             "Votre niveau d'anglais",
-            ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"]
+            ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"],
+            key="level_selection"
         )
         
         # Sujets de conversation
@@ -396,7 +401,7 @@ with st.sidebar:
             "Movies & TV", "Work & Career", "Family & Friends",
             "Weather", "Technology", "Sports"
         ]
-        selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics)
+        selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics, key="topic_selection")
         
         # Statistiques de session
         st.subheader("📊 Session actuelle")
@@ -488,7 +493,8 @@ with st.sidebar:
             conv_title = st.text_input(
                 "Titre de la conversation",
                 value=st.session_state.conversation_title,
-                placeholder="Ex: Ma première conversation"
+                placeholder="Ex: Ma première conversation",
+                key="conv_title_input"
             )
             
             col_save1, col_save2 = st.columns(2)
@@ -555,7 +561,7 @@ with st.sidebar:
             st.subheader(f"📚 Historique ({len(saved_conversations)})")
             
             # Option de recherche
-            search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...")
+            search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...", key="search_conversations")
             
             # Filtrer les conversations
             filtered_convs = saved_conversations
