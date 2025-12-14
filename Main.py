@@ -277,6 +277,15 @@ saved_conversations = load_from_database()
 st.title("🗣️ English Conversation Practice")
 st.markdown("### Pratiquez votre anglais avec une conversation naturelle - 100% GRATUIT")
 
+# Initialiser des variables par défaut pour éviter les erreurs
+service = "Groq (Recommandé)"
+api_key = ""
+enable_tts = True
+voice_choice = "nova"
+auto_play = True
+level = "Intermédiaire (B1-B2)"
+selected_topic = "Libre"
+
 # Sidebar pour les paramètres
 with st.sidebar:
     st.header("⚙️ Paramètres")
@@ -285,7 +294,8 @@ with st.sidebar:
     tab = st.radio(
         "Navigation",
         ["💬 Conversation", "📊 Statistiques", "💾 Sauvegardes"],
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="navigation_tabs"
     )
     
     st.divider()
